@@ -51,16 +51,14 @@ public:
         Tensor hidden = be->alloc(Shape({1, action_horizon_, 1024}),
                                   DType::Float16, stream);
         // x_t → hidden
-        be->gemm(x_t.view({action_horizon_, action_dim_}),
-                 dit_weight_,
-                 hidden.view({action_horizon_, 1024}),
-                 1.f, 0.f, false, true, stream);
+        Tensor x_t_2d     = x_t.view({action_horizon_, action_dim_});
+        Tensor hidden_2d  = hidden.view({action_horizon_, 1024});
+        be->gemm(x_t_2d, dit_weight_, hidden_2d, 1.f, 0.f, false, true, stream);
         be->gelu(hidden, hidden, stream);
         // hidden → velocity
-        be->gemm(hidden.view({action_horizon_, 1024}),
-                 action_weight_,
-                 velocity.view({action_horizon_, action_dim_}),
-                 1.f, 0.f, false, true, stream);
+        Tensor hidden_2d2 = hidden.view({action_horizon_, 1024});
+        Tensor vel_2d     = velocity.view({action_horizon_, action_dim_});
+        be->gemm(hidden_2d2, action_weight_, vel_2d, 1.f, 0.f, false, true, stream);
     }
 
     Tensor decode_action(const Tensor& raw, BackendPtr /*be*/,

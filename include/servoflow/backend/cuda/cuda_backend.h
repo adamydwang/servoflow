@@ -5,6 +5,9 @@
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
 #include <memory>
+#include <mutex>
+#include <unordered_map>
+#include <vector>
 
 namespace sf {
 namespace cuda {

@@ -112,8 +112,9 @@ private:
 
     // Action input projection: maps noisy action to token space.
     struct ActionInputProj {
-        Tensor weight;  // [hidden_dim, action_dim]
-        Tensor bias;    // [hidden_dim]
+        Tensor weight;          // [hidden_dim, action_dim]
+        Tensor bias;            // [hidden_dim]
+        int64_t hidden_dim = 0;
 
         // [B, T_action, action_dim] → [B, T_action, hidden_dim]
         Tensor forward(const Tensor& action, BackendPtr backend,
@@ -122,8 +123,9 @@ private:
 
     // Robot state tokeniser: maps state vector to a single token.
     struct StateTokeniser {
-        Tensor weight;  // [hidden_dim, state_dim]
-        Tensor bias;    // [hidden_dim]
+        Tensor weight;          // [hidden_dim, state_dim]
+        Tensor bias;            // [hidden_dim]
+        int64_t hidden_dim = 0;
 
         // [B, state_dim] → [B, 1, hidden_dim]
         Tensor forward(const Tensor& state, BackendPtr backend,

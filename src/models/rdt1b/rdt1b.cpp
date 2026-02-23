@@ -274,7 +274,8 @@ void RDT1BModel::denoise_step(const Tensor& x_t, float t,
         Tensor t_emb_b = backend->alloc(Shape({B, D}), dt, stream);
         for (int64_t b = 0; b < B; ++b) {
             // TODO: implement a proper expand/broadcast op for efficiency.
-            backend->copy(t_emb_b.slice(b, b + 1), t_emb, stream);
+            Tensor row = t_emb_b.slice(b, b + 1);
+            backend->copy(row, t_emb, stream);
         }
         t_emb = t_emb_b;
     }

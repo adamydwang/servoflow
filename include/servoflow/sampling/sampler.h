@@ -29,6 +29,13 @@ struct Schedule {
     std::vector<float> linspace() const;
 };
 
+// Pre-allocated working buffers owned by InferenceEngine.
+// Passed into sample() to guarantee stable addresses for CUDA Graph capture.
+struct SamplerBuffers {
+    Tensor x_t;       // [B, T_action, action_dim] — noisy action (in/out)
+    Tensor velocity;  // [B, T_action, action_dim] — predicted velocity (scratch)
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 // ISampler: interface for all sampling strategies.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -61,13 +68,6 @@ public:
 // allocate these buffers and pass them via SamplerBuffers. The sampler
 // never allocates inside sample() when buffers are provided.
 // ─────────────────────────────────────────────────────────────────────────────
-
-// Pre-allocated working buffers owned by InferenceEngine.
-// Passed into sample() to guarantee stable addresses for CUDA Graph capture.
-struct SamplerBuffers {
-    Tensor x_t;       // [B, T_action, action_dim] — noisy action (in/out)
-    Tensor velocity;  // [B, T_action, action_dim] — predicted velocity (scratch)
-};
 
 class FlowMatchingSampler : public ISampler {
 public:

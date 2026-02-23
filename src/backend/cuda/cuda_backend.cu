@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "servoflow/backend/cuda/cuda_backend.h"
-#include "servoflow/backend/cuda/ops/attention.h"
-#include "servoflow/backend/cuda/ops/elementwise.cuh"
-#include "servoflow/backend/cuda/ops/norm.cuh"
+#include "backend/cuda/ops/attention.h"
+#include "backend/cuda/ops/elementwise.cuh"
+#include "backend/cuda/ops/norm.cuh"
 
 #include <cuda_fp16.h>
 #include <cublas_v2.h>
@@ -43,7 +43,7 @@ namespace cuda {
 CUDAMemoryPool::CUDAMemoryPool(int device_index) : device_index_(device_index) {}
 
 CUDAMemoryPool::~CUDAMemoryPool() {
-    empty_cache();
+    try { empty_cache(); } catch (...) {}
 }
 
 size_t CUDAMemoryPool::round_up(size_t bytes) {
@@ -88,7 +88,12 @@ void CUDAMemoryPool::free(void* ptr, size_t bytes) {
 
 void CUDAMemoryPool::empty_cache() {
     std::lock_guard<std::mutex> lk(mu_);
-    SF_CUDA_CHECK(cudaSetDevice(device_index_));
+    cudaError_t set_err = cudaSetDevice(device_index_);
+    // cudaErrorCudartUnloading means the process is exiting and the driver
+    // has already started teardown — all device memory will be reclaimed
+    // automatically; nothing for us to do.
+    if (set_err == cudaErrorCudartUnloading) return;
+    SF_CUDA_CHECK(set_err);
     for (auto& [size, blocks] : free_blocks_) {
         for (auto& b : blocks) {
             cudaFree(b.ptr);
@@ -143,7 +148,13 @@ CUDABackend::CUDABackend(int device_index)
 }
 
 CUDABackend::~CUDABackend() {
-    if (cublas_) cublasDestroy(cublas_);
+    // cublasDestroy may fail if the CUDA driver is already shutting down.
+    if (cublas_) {
+        cudaError_t e = cudaSetDevice(device_index_);
+        if (e != cudaErrorCudartUnloading)
+            cublasDestroy(cublas_);
+        cublas_ = nullptr;
+    }
 }
 
 BackendCaps CUDABackend::caps() const {

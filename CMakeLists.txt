@@ -91,13 +91,14 @@ set(SF_CORE_SOURCES
     src/engine/inference_engine.cpp
     src/loader/safetensors.cpp
     src/models/rdt1b/config.cpp
-    src/models/rdt1b/dit_block.cpp
     src/models/rdt1b/rdt1b.cpp
 )
 
 set(SF_CUDA_SOURCES
     src/backend/cuda/cuda_backend.cu
     src/backend/cuda/ops/attention.cu
+    src/backend/cuda/ops/elementwise.cu
+    src/models/rdt1b/dit_block.cu
 )
 
 # ── servoflow library target ──────────────────────────────────────────────────
@@ -158,6 +159,12 @@ endif()
 
 # ── Install rules ─────────────────────────────────────────────────────────────
 include(GNUInstallDirs)
+
+# Export nlohmann_json alongside servoflow so that the install set is complete.
+install(TARGETS nlohmann_json
+    EXPORT servoflow-targets
+)
+
 install(TARGETS servoflow
     EXPORT servoflow-targets
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}

@@ -22,6 +22,7 @@
 
 #include "servoflow/core/tensor.h"
 #include "servoflow/models/rdt1b/dit_block.h"  // for WeightMap
+#include <nlohmann/json.hpp>
 #include <string>
 #include <unordered_map>
 #include <vector>
