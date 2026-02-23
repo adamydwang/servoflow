@@ -23,14 +23,17 @@ public:
                           int64_t action_horizon = 64)
         : backend_(backend), action_dim_(action_dim),
           action_horizon_(action_horizon) {
-        // Pre-allocate dummy weights for stub ops.
-        cond_embed_    = backend->alloc(Shape({1, 512, 1024}), DType::Float16);
-        dit_weight_    = backend->alloc(Shape({1024, 1024}),   DType::Float16);
-        action_weight_ = backend->alloc(Shape({action_dim_, 1024}), DType::Float16);
+        // Pre-allocate all buffers (weights + intermediates) so that no
+        // cudaMalloc occurs during CUDA Graph capture.
+        cond_embed_    = backend->alloc(Shape({1, 512, 1024}),             DType::Float16);
+        dit_weight_    = backend->alloc(Shape({1024, 1024}),               DType::Float16);
+        action_weight_ = backend->alloc(Shape({action_dim_, 1024}),        DType::Float16);
+        hidden_buf_    = backend->alloc(Shape({1, action_horizon_, 1024}), DType::Float16);
         StreamHandle s = backend->create_stream();
         backend->fill(cond_embed_,    0.01f, s);
         backend->fill(dit_weight_,    0.01f, s);
         backend->fill(action_weight_, 0.01f, s);
+        backend->fill(hidden_buf_,    0.0f,  s);
         backend->sync_stream(s);
         backend->destroy_stream(s);
     }
@@ -47,16 +50,13 @@ public:
                       Tensor& velocity,
                       BackendPtr be, StreamHandle stream) override {
         // Stub DiT step: one Linear + GELU + Linear.
-        // Shape: x_t [1, T, action_dim] → project to [1, T, 1024] → back.
-        Tensor hidden = be->alloc(Shape({1, action_horizon_, 1024}),
-                                  DType::Float16, stream);
-        // x_t → hidden
+        // Use pre-allocated hidden_buf_ to avoid cudaMalloc during Graph capture.
         Tensor x_t_2d     = x_t.view({action_horizon_, action_dim_});
-        Tensor hidden_2d  = hidden.view({action_horizon_, 1024});
+        Tensor hidden_2d  = hidden_buf_.view({action_horizon_, 1024});
         be->gemm(x_t_2d, dit_weight_, hidden_2d, 1.f, 0.f, false, true, stream);
-        be->gelu(hidden, hidden, stream);
+        be->gelu(hidden_buf_, hidden_buf_, stream);
         // hidden → velocity
-        Tensor hidden_2d2 = hidden.view({action_horizon_, 1024});
+        Tensor hidden_2d2 = hidden_buf_.view({action_horizon_, 1024});
         Tensor vel_2d     = velocity.view({action_horizon_, action_dim_});
         be->gemm(hidden_2d2, action_weight_, vel_2d, 1.f, 0.f, false, true, stream);
     }
@@ -77,6 +77,7 @@ private:
     Tensor     cond_embed_;
     Tensor     dit_weight_;
     Tensor     action_weight_;
+    Tensor     hidden_buf_;   // pre-allocated intermediate (CUDA-Graph-safe)
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
