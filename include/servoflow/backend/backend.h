@@ -121,6 +121,18 @@ public:
                           Tensor& out, float eps = 1e-6f,
                           StreamHandle stream = nullptr) = 0;
 
+    // Fused Add + RMSNorm
+    // out = RMSNorm(input + residual)
+    // residual = input + residual (in-place)
+    virtual void fused_add_rms_norm(const Tensor& input, Tensor& residual,
+                                    const Tensor& gamma, Tensor& out,
+                                    float eps = 1e-6f,
+                                    StreamHandle stream = nullptr) {
+        // Fallback
+        add(input, residual, residual, stream);
+        rms_norm(residual, gamma, out, eps, stream);
+    }
+
     // Element-wise: out = a + b  (broadcast along leading dims supported)
     virtual void add(const Tensor& a, const Tensor& b, Tensor& out,
                      StreamHandle stream = nullptr) = 0;
@@ -132,6 +144,43 @@ public:
     // Element-wise: out = a * scalar
     virtual void scale(const Tensor& a, float scalar, Tensor& out,
                        StreamHandle stream = nullptr) = 0;
+
+    // Activation types for fused kernels
+    enum class ActivationType {
+        None,
+        GELU,
+        SiLU,
+        ReLU
+    };
+
+    // Fused GEMM + Bias + Activation
+    // C = Act(alpha * A @ B + bias)
+    // bias is [N] (broadcasted to [M, N])
+    virtual void gemm_bias_act(const Tensor& A, const Tensor& B, 
+                               const Tensor& bias, Tensor& C,
+                               ActivationType act = ActivationType::None,
+                               float alpha = 1.f, float beta = 0.f,
+                               bool trans_a = false, bool trans_b = false,
+                               StreamHandle stream = nullptr) {
+        // Default fallback implementation
+        gemm(A, B, C, alpha, beta, trans_a, trans_b, stream);
+        // We assume bias is broadcastable. If C is [M, N] and bias is [N], 
+        // add() should handle it if implemented robustly, or we reshape.
+        // For safety here, we rely on the backend's add() to handle broadcasting
+        // or the caller to provide correct shapes.
+        // In ServoFlow, bias is usually [N], C is [M, N]. 
+        // Standard add() might expect matching shapes or explicit broadcast.
+        // Let's rely on specific backends to override this for performance,
+        // and this fallback is just a functional placeholder.
+        add(C, bias, C, stream);
+        
+        switch (act) {
+            case ActivationType::GELU: gelu(C, C, stream); break;
+            case ActivationType::SiLU: silu(C, C, stream); break;
+            // case ActivationType::ReLU: relu(C, C, stream); break; // Need relu() interface if we support it
+            default: break;
+        }
+    }
 
     // Activation functions (in-place: out may alias x).
     virtual void gelu(const Tensor& x, Tensor& out,

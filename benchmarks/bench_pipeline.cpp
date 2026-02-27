@@ -36,11 +36,12 @@ int main(int argc, char** argv) {
     config.device = Device{DeviceType::CUDA, 0};
     config.compute_dtype = DType::Float16;
     config.num_denoise_steps = steps;
-    config.use_cuda_graph = false;
+    config.use_cuda_graph = true;
     config.pinned_output = true;
     config.cache_condition = true; 
     
     // Create sampler (Flow Matching for RDT-1B)
+    // Start with graph disabled for warmup to allow workspace allocation
     auto sampler = std::make_shared<FlowMatchingSampler>(/*use_cuda_graph=*/false);
 
     InferenceEngine engine(model, sampler, config);
@@ -77,6 +78,10 @@ int main(int argc, char** argv) {
         engine.infer(input);
     }
     backend->sync_device();
+
+    // Enable graph for benchmark
+    sampler->set_enable_graph(true);
+    std::cout << "  CUDA Graph enabled." << std::endl;
 
     // 6. Benchmark
     std::cout << "  Benchmarking..." << std::endl;

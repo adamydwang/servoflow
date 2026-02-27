@@ -359,7 +359,13 @@ void RDT1BModel::denoise_step(const Tensor& x_t, float t,
     Tensor final_out = final_layer_.forward(x_cur, backend, stream);
 
     // Take last T tokens: [B, T, action_dim]
-    velocity = slice_dim1_b1(final_out, 3, T + 3);  // [B, T, action_dim]
+    Tensor result = slice_dim1_b1(final_out, 3, T + 3);  // [B, T, action_dim]
+    
+    // CRITICAL for CUDA Graph: copy result to pre-allocated velocity buffer.
+    // Do NOT reassign 'velocity' tensor, as that would make it point to
+    // memory allocated inside the graph (final_out), preventing proper
+    // graph-local deallocation.
+    backend->copy(velocity, result, stream);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

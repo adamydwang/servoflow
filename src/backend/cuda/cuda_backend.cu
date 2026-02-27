@@ -43,68 +43,35 @@ namespace cuda {
 CUDAMemoryPool::CUDAMemoryPool(int device_index) : device_index_(device_index) {}
 
 CUDAMemoryPool::~CUDAMemoryPool() {
-    try { empty_cache(); } catch (...) {}
+    // No explicit cleanup needed for async pool (driver manages it)
 }
 
-size_t CUDAMemoryPool::round_up(size_t bytes) {
-    // Round up to the next power of two (minimum 512 bytes).
-    if (bytes <= 512) return 512;
-    size_t p = 512;
-    while (p < bytes) p <<= 1;
-    return p;
-}
-
-void* CUDAMemoryPool::alloc(size_t bytes) {
-    size_t bucket = round_up(bytes);
-    {
-        std::lock_guard<std::mutex> lk(mu_);
-        auto& list = free_blocks_[bucket];
-        if (!list.empty()) {
-            void* ptr = list.back().ptr;
-            list.pop_back();
-            cached_bytes_    -= bucket;
-            allocated_bytes_ += bucket;
-            return ptr;
-        }
-    }
-    // No cached block; allocate from CUDA.
+void* CUDAMemoryPool::alloc(size_t bytes, cudaStream_t stream) {
     SF_CUDA_CHECK(cudaSetDevice(device_index_));
     void* ptr = nullptr;
-    SF_CUDA_CHECK(cudaMalloc(&ptr, bucket));
-    {
-        std::lock_guard<std::mutex> lk(mu_);
-        allocated_bytes_ += bucket;
+    // Use cudaMallocAsync for graph-safe allocation
+    cudaError_t err = cudaMallocAsync(&ptr, bytes, stream);
+    if (err != cudaSuccess) {
+        fprintf(stderr, "CUDAMemoryPool::alloc failed: bytes=%zu, stream=%p, error=%s\n",
+                bytes, (void*)stream, cudaGetErrorString(err));
+        throw std::runtime_error("cudaMallocAsync failed");
     }
     return ptr;
 }
 
-void CUDAMemoryPool::free(void* ptr, size_t bytes) {
-    size_t bucket = round_up(bytes);
-    std::lock_guard<std::mutex> lk(mu_);
-    free_blocks_[bucket].push_back({ptr, bucket});
-    cached_bytes_    += bucket;
-    allocated_bytes_ -= bucket;
-}
-
-void CUDAMemoryPool::empty_cache() {
-    std::lock_guard<std::mutex> lk(mu_);
-    cudaError_t set_err = cudaSetDevice(device_index_);
-    // cudaErrorCudartUnloading means the process is exiting and the driver
-    // has already started teardown — all device memory will be reclaimed
-    // automatically; nothing for us to do.
-    if (set_err == cudaErrorCudartUnloading) return;
-    SF_CUDA_CHECK(set_err);
-    for (auto& [size, blocks] : free_blocks_) {
-        for (auto& b : blocks) {
-            cudaFree(b.ptr);
-            cached_bytes_ -= size;
-        }
-        blocks.clear();
+void CUDAMemoryPool::free(void* ptr, size_t bytes, cudaStream_t stream) {
+    (void)bytes; // Not needed for cudaFreeAsync
+    if (ptr) {
+        // Use cudaFreeAsync for graph-safe deallocation
+        cudaFreeAsync(ptr, stream);
     }
 }
 
-size_t CUDAMemoryPool::cached_bytes()    const { return cached_bytes_;    }
-size_t CUDAMemoryPool::allocated_bytes() const { return allocated_bytes_; }
+void CUDAMemoryPool::empty_cache() {
+    // cudaMallocAsync pool is managed by the driver.
+    // We can hint to release memory using cudaDeviceSetLimit?
+    // For now, do nothing or just synchronize.
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CUDAGraph
@@ -145,15 +112,24 @@ CUDABackend::CUDABackend(int device_index)
     SF_CUBLAS_CHECK(cublasCreate(&cublas_));
     // Enable Tensor Cores for fp16/bf16 workloads.
     SF_CUBLAS_CHECK(cublasSetMathMode(cublas_, CUBLAS_TF32_TENSOR_OP_MATH));
+    
+    // Initialize cublasLt
+    SF_CUBLAS_CHECK(cublasLtCreate(&cublas_lt_));
 }
 
 CUDABackend::~CUDABackend() {
     // cublasDestroy may fail if the CUDA driver is already shutting down.
     if (cublas_) {
         cudaError_t e = cudaSetDevice(device_index_);
-        if (e != cudaErrorCudartUnloading)
+        if (e != cudaErrorCudartUnloading) {
             cublasDestroy(cublas_);
+            if (cublas_lt_) cublasLtDestroy(cublas_lt_);
+            if (attention_workspace_) {
+                cudaFree(attention_workspace_);
+            }
+        }
         cublas_ = nullptr;
+        cublas_lt_ = nullptr;
     }
 }
 
@@ -186,40 +162,16 @@ Tensor CUDABackend::alloc(Shape shape, DType dtype, StreamHandle stream) {
     size_t bytes = shape.nbytes(dtype_size(dtype));
     cudaStream_t cuda_stream = static_cast<cudaStream_t>(stream);
     
-    cudaStreamCaptureStatus capture_status = cudaStreamCaptureStatusNone;
-    if (cuda_stream != nullptr) {
-        cudaError_t err = cudaStreamIsCapturing(cuda_stream, &capture_status);
-        if (err != cudaSuccess) {
-            // If checking capture status fails, assume no capture and clear error?
-            // Or just proceed.
-            cudaGetLastError(); // clear error
-            capture_status = cudaStreamCaptureStatusNone;
-        }
-    }
-
-    // If capturing, use cudaMallocAsync/cudaFreeAsync to be graph-friendly.
-    if (capture_status == cudaStreamCaptureStatusActive) {
-        void* ptr = nullptr;
-        SF_CUDA_CHECK(cudaMallocAsync(&ptr, bytes, cuda_stream));
-        
-        // Deleter must use the same stream (or compatible) for async free.
-        // Capturing the stream by value in the lambda.
-        auto deleter = [ptr, cuda_stream](void*) {
-            cudaFreeAsync(ptr, cuda_stream);
-        };
-        
-        Device dev(DeviceType::CUDA, device_index_);
-        auto storage = std::make_shared<Storage>(ptr, bytes, dev, deleter);
-        return Tensor(std::move(storage), std::move(shape), dtype);
-    }
-
-    // Otherwise use our manual memory pool (synchronous alloc).
-    void*  ptr   = pool_.alloc(bytes);
+    // Always use our async-aware memory pool
+    void* ptr = pool_.alloc(bytes, cuda_stream);
     Device dev(DeviceType::CUDA, device_index_);
 
-    // Capture pool reference for the deleter (lambda captures by value).
+    // Capture pool reference and stream for the deleter
     CUDAMemoryPool* pool_ptr = &pool_;
-    auto deleter = [pool_ptr, bytes](void* p) { pool_ptr->free(p, bytes); };
+    auto deleter = [pool_ptr, bytes, cuda_stream](void* p) { 
+        pool_ptr->free(p, bytes, cuda_stream); 
+    };
+    
     auto storage = std::make_shared<Storage>(ptr, bytes, dev, deleter);
     return Tensor(std::move(storage), std::move(shape), dtype);
 }
@@ -380,14 +332,184 @@ void CUDABackend::batched_gemm(const Tensor& A, const Tensor& B, Tensor& C,
     }
 }
 
+void CUDABackend::gemm_bias_act(const Tensor& A, const Tensor& B, 
+                                const Tensor& bias, Tensor& C,
+                                ActivationType act,
+                                float alpha, float beta,
+                                bool trans_a, bool trans_b,
+                                StreamHandle stream) {
+    check_device(A, "A"); check_device(B, "B"); check_device(C, "C");
+    if (bias.numel() > 0) check_device(bias, "bias");
+
+    // Only support float16/bfloat16 for cublasLt acceleration
+    bool is_fp16 = (A.dtype() == DType::Float16);
+    bool is_bf16 = (A.dtype() == DType::BFloat16);
+    
+    if (!is_fp16 && !is_bf16) {
+        // Fallback to base implementation
+        IBackend::gemm_bias_act(A, B, bias, C, act, alpha, beta, trans_a, trans_b, stream);
+        return;
+    }
+
+    cudaStream_t cuda_stream = to_stream(stream);
+    
+    // Create descriptors
+    cublasLtMatmulDesc_t opDesc = nullptr;
+    cublasLtMatrixLayout_t Adesc = nullptr, Bdesc = nullptr, Cdesc = nullptr;
+    cublasLtMatmulPreference_t preference = nullptr;
+    
+    try {
+        cudaDataType_t dt = is_fp16 ? CUDA_R_16F : CUDA_R_16BF;
+        cublasComputeType_t computeType = CUBLAS_COMPUTE_32F;
+        cudaDataType_t scaleType = CUDA_R_32F;
+
+        SF_CUBLAS_CHECK(cublasLtMatmulDescCreate(&opDesc, computeType, scaleType));
+        
+        // We use the standard trick: C_row = A_row * B_row  <=>  C_col^T = B_col^T * A_col^T
+        // We swap A and B, and use Col Major (default).
+        // cublasLtMatmul(B, A) -> C.
+        
+        cublasOperation_t opA = trans_b ? CUBLAS_OP_T : CUBLAS_OP_N;
+        cublasOperation_t opB = trans_a ? CUBLAS_OP_T : CUBLAS_OP_N;
+        
+        SF_CUBLAS_CHECK(cublasLtMatmulDescSetAttribute(opDesc, CUBLASLT_MATMUL_DESC_TRANSA, &opA, sizeof(opA)));
+        SF_CUBLAS_CHECK(cublasLtMatmulDescSetAttribute(opDesc, CUBLASLT_MATMUL_DESC_TRANSB, &opB, sizeof(opB)));
+
+        // Epilogue setup
+        cublasLtEpilogue_t epilogue = CUBLASLT_EPILOGUE_DEFAULT;
+        if (bias.numel() > 0) {
+            if (act == ActivationType::GELU) epilogue = CUBLASLT_EPILOGUE_GELU_BIAS;
+            else if (act == ActivationType::ReLU) epilogue = CUBLASLT_EPILOGUE_RELU_BIAS;
+            else epilogue = CUBLASLT_EPILOGUE_BIAS; 
+        } else {
+            if (act == ActivationType::GELU) epilogue = CUBLASLT_EPILOGUE_GELU;
+            else if (act == ActivationType::ReLU) epilogue = CUBLASLT_EPILOGUE_RELU;
+        }
+        SF_CUBLAS_CHECK(cublasLtMatmulDescSetAttribute(opDesc, CUBLASLT_MATMUL_DESC_EPILOGUE, &epilogue, sizeof(epilogue)));
+        
+        if (bias.numel() > 0) {
+            const void* bias_ptr = bias.raw_data_ptr();
+            SF_CUBLAS_CHECK(cublasLtMatmulDescSetAttribute(opDesc, CUBLASLT_MATMUL_DESC_BIAS_POINTER, &bias_ptr, sizeof(bias_ptr)));
+        }
+
+        // Layouts (Col Major logic on Row Major data)
+        // Rows/Cols are swapped. ld is the original columns (stride).
+        
+        // Matrix A (for cublas) is B (original).
+        int rowsA = B.shape()[1]; // Cols of B
+        int colsA = B.shape()[0]; // Rows of B
+        int ldA   = B.shape()[1]; // Stride of B (cols)
+        SF_CUBLAS_CHECK(cublasLtMatrixLayoutCreate(&Adesc, dt, rowsA, colsA, ldA));
+
+        // Matrix B (for cublas) is A (original).
+        int rowsB = A.shape()[1];
+        int colsB = A.shape()[0];
+        int ldB   = A.shape()[1];
+        SF_CUBLAS_CHECK(cublasLtMatrixLayoutCreate(&Bdesc, dt, rowsB, colsB, ldB));
+
+        // Matrix C (for cublas) is C (original).
+        int rowsC = C.shape()[1];
+        int colsC = C.shape()[0];
+        int ldC   = C.shape()[1];
+        SF_CUBLAS_CHECK(cublasLtMatrixLayoutCreate(&Cdesc, dt, rowsC, colsC, ldC));
+
+        // Heuristic
+        SF_CUBLAS_CHECK(cublasLtMatmulPreferenceCreate(&preference));
+        
+        // Use existing workspace if possible
+        void* workspace = nullptr;
+        size_t workspaceSize = 0;
+        {
+            std::lock_guard<std::mutex> lk(attention_mu_);
+            if (attention_workspace_size_ > 0) {
+                workspace = attention_workspace_;
+                workspaceSize = attention_workspace_size_;
+            }
+        }
+        SF_CUBLAS_CHECK(cublasLtMatmulPreferenceSetAttribute(preference, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &workspaceSize, sizeof(workspaceSize)));
+
+        cublasLtMatmulHeuristicResult_t heuristicResult = {};
+        int returnedResults = 0;
+        SF_CUBLAS_CHECK(cublasLtMatmulAlgoGetHeuristic(cublas_lt_, opDesc, Adesc, Bdesc, Cdesc, Cdesc, preference, 1, &heuristicResult, &returnedResults));
+
+        if (returnedResults == 0) {
+            // Fallback
+            IBackend::gemm_bias_act(A, B, bias, C, act, alpha, beta, trans_a, trans_b, stream);
+        } else {
+            // Swap A and B in the call
+            SF_CUBLAS_CHECK(cublasLtMatmul(cublas_lt_, opDesc, 
+                &alpha, B.raw_data_ptr(), Adesc, 
+                A.raw_data_ptr(), Bdesc, 
+                &beta, C.raw_data_ptr(), Cdesc, 
+                C.raw_data_ptr(), Cdesc, 
+                &heuristicResult.algo, workspace, workspaceSize, cuda_stream));
+                
+            if (act == ActivationType::SiLU) {
+                 silu(C, C, stream);
+            }
+        }
+    } catch (...) {
+        if (preference) cublasLtMatmulPreferenceDestroy(preference);
+        if (Cdesc) cublasLtMatrixLayoutDestroy(Cdesc);
+        if (Bdesc) cublasLtMatrixLayoutDestroy(Bdesc);
+        if (Adesc) cublasLtMatrixLayoutDestroy(Adesc);
+        if (opDesc) cublasLtMatmulDescDestroy(opDesc);
+        throw;
+    }
+
+    if (preference) cublasLtMatmulPreferenceDestroy(preference);
+    if (Cdesc) cublasLtMatrixLayoutDestroy(Cdesc);
+    if (Bdesc) cublasLtMatrixLayoutDestroy(Bdesc);
+    if (Adesc) cublasLtMatrixLayoutDestroy(Adesc);
+    if (opDesc) cublasLtMatmulDescDestroy(opDesc);
+}
+
 // ── Attention ─────────────────────────────────────────────────────────────────
 void CUDABackend::attention(const Tensor& Q, const Tensor& K, const Tensor& V,
-                            Tensor& out, const Tensor* mask,
+                            Tensor& out,
+                            const Tensor* mask,
                             float scale, bool is_causal,
                             StreamHandle stream) {
     check_device(Q, "Q"); check_device(K, "K");
     check_device(V, "V"); check_device(out, "out");
+
+    int64_t B  = Q.shape()[0];
+    int64_t H  = Q.shape()[1];
+    int64_t Sq = Q.shape()[2];
+    
+    // For FlashAttention (fp16/bf16), we need a workspace for softmax_lse.
+    // If not using FA (e.g. fp32), workspace is ignored but we allocate it anyway for simplicity.
+    size_t lse_bytes = static_cast<size_t>(B) * H * Sq * sizeof(float);
+    size_t padding = 128 * 1024; 
+    size_t required = lse_bytes + padding;
+
+    // We use a simple strategy: lock, check if current workspace is big enough.
+    // If not, reallocate (synchronously). 
+    // This is safe for Graph Capture IF the reallocation happens *before* capture begins
+    // or if the size is stable during capture.
+    // Since RDT-1B has fixed sequence lengths during inference, this should stabilize
+    // after the first warmup run.
+    
+    void* ws_ptr = nullptr;
+    size_t ws_size = 0;
+    
+    {
+        std::lock_guard<std::mutex> lk(attention_mu_);
+        if (attention_workspace_size_ < required) {
+            // Reallocate
+            SF_CUDA_CHECK(cudaSetDevice(device_index_));
+            if (attention_workspace_) {
+                SF_CUDA_CHECK(cudaFree(attention_workspace_));
+            }
+            SF_CUDA_CHECK(cudaMalloc(&attention_workspace_, required));
+            attention_workspace_size_ = required;
+        }
+        ws_ptr = attention_workspace_;
+        ws_size = attention_workspace_size_;
+    }
+
     cuda_ops::flash_attention(Q, K, V, out, mask, scale, is_causal,
+                              ws_ptr, ws_size,
                               to_stream(stream));
 }
 
@@ -403,6 +525,13 @@ void CUDABackend::rms_norm(const Tensor& x, const Tensor& gamma,
                            Tensor& out, float eps, StreamHandle stream) {
     check_device(x, "x");
     cuda_ops::rms_norm_kernel(x, gamma, out, eps, to_stream(stream));
+}
+
+void CUDABackend::fused_add_rms_norm(const Tensor& input, Tensor& residual,
+                                     const Tensor& gamma, Tensor& out,
+                                     float eps, StreamHandle stream) {
+    check_device(input, "input"); check_device(residual, "residual");
+    cuda_ops::fused_add_rms_norm_kernel(input, residual, gamma, out, eps, to_stream(stream));
 }
 
 // ── Element-wise ──────────────────────────────────────────────────────────────

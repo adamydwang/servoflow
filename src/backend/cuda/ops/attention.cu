@@ -29,6 +29,7 @@ namespace cuda_ops {
 static void flash_attn_dispatch(const Tensor& Q, const Tensor& K, const Tensor& V,
                                 Tensor& out, const Tensor* /*mask*/,
                                 float scale, bool is_causal,
+                                void* workspace, size_t workspace_size,
                                 cudaStream_t stream) {
     int64_t B  = Q.shape()[0];
     int64_t H  = Q.shape()[1];
@@ -53,35 +54,29 @@ static void flash_attn_dispatch(const Tensor& Q, const Tensor& K, const Tensor& 
     // For D=64, kBlockN=256. If Sk=128, it reads 256, so we need extra padding.
     // 128KB padding is sufficient.
     size_t padding = 128 * 1024;
-    
-    void *softmax_lse = nullptr;
-    cudaError_t malloc_err = cudaMalloc(&softmax_lse, lse_bytes + padding);
-    if (malloc_err != cudaSuccess) {
-        throw std::runtime_error("cudaMalloc failed");
-    }
-    cudaMemsetAsync(softmax_lse, 0, lse_bytes + padding, stream);
-    
-    try {
-        // ServoFlow layout is [B, H, S, D].
-        // FlashAttention supports this via strides.
-        // We pass is_BSHD=false to indicate [B, H, S, D] layout.
-        flash_attn::mha_fwd(
-            Q.raw_data_ptr(), K.raw_data_ptr(), V.raw_data_ptr(),
-            out.raw_data_ptr(),
-            softmax_lse,
-            B, Sq, Sk, H, H_k, D,
-            scale, is_causal,
-            /*window_size_left=*/-1, /*window_size_right=*/is_causal ? 0 : -1,
-            /*softcap=*/0.f,
-            /*is_bf16=*/is_bf16,
-            stream,
-            /*is_BSHD=*/false);
-    } catch (const std::exception& e) {
-        cudaFree(softmax_lse);
-        throw;
+    size_t required = lse_bytes + padding;
+
+    if (!workspace || workspace_size < required) {
+        throw std::runtime_error("FlashAttention workspace too small");
     }
     
-    cudaFree(softmax_lse);
+    void *softmax_lse = workspace;
+    cudaMemsetAsync(softmax_lse, 0, required, stream);
+    
+    // ServoFlow layout is [B, H, S, D].
+    // FlashAttention supports this via strides.
+    // We pass is_BSHD=false to indicate [B, H, S, D] layout.
+    flash_attn::mha_fwd(
+        Q.raw_data_ptr(), K.raw_data_ptr(), V.raw_data_ptr(),
+        out.raw_data_ptr(),
+        softmax_lse,
+        B, Sq, Sk, H, H_k, D,
+        scale, is_causal,
+        /*window_size_left=*/-1, /*window_size_right=*/is_causal ? 0 : -1,
+        /*softcap=*/0.f,
+        /*is_bf16=*/is_bf16,
+        stream,
+        /*is_BSHD=*/false);
 }
 #endif  // SF_USE_FLASH_ATTN
 
@@ -189,11 +184,12 @@ void flash_attention(const Tensor& Q, const Tensor& K, const Tensor& V,
                      Tensor& out,
                      const Tensor* mask,
                      float scale, bool is_causal,
+                     void* workspace, size_t workspace_size,
                      cudaStream_t stream) {
 #ifdef SF_USE_FLASH_ATTN
     // Use FlashAttention if possible (fp16/bf16).
     if (Q.dtype() == DType::Float16 || Q.dtype() == DType::BFloat16) {
-        flash_attn_dispatch(Q, K, V, out, mask, scale, is_causal, stream);
+        flash_attn_dispatch(Q, K, V, out, mask, scale, is_causal, workspace, workspace_size, stream);
         return;
     }
 #endif

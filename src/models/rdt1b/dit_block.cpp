@@ -107,16 +107,15 @@ Tensor TimestepEmbedding::forward(float t, BackendPtr backend,
 
     // Linear1: [1, freq_dim] × [freq_dim, embed_dim] → [1, embed_dim]
     Tensor h = backend->alloc(Shape({1, embed_dim_}), dt, stream);
-    backend->gemm(emb, linear1_weight_, h,
-                  1.f, 0.f, false, true, stream);
-    backend->add(h, linear1_bias_.view({1, embed_dim_}), h, stream);
-    backend->silu(h, h, stream);
+    backend->gemm_bias_act(emb, linear1_weight_, linear1_bias_, h,
+                           IBackend::ActivationType::SiLU,
+                           1.f, 0.f, false, true, stream);
 
     // Linear2: [1, embed_dim] × [embed_dim, embed_dim] → [1, embed_dim]
     Tensor out = backend->alloc(Shape({1, embed_dim_}), dt, stream);
-    backend->gemm(h, linear2_weight_, out,
-                  1.f, 0.f, false, true, stream);
-    backend->add(out, linear2_bias_.view({1, embed_dim_}), out, stream);
+    backend->gemm_bias_act(h, linear2_weight_, linear2_bias_, out,
+                           IBackend::ActivationType::None,
+                           1.f, 0.f, false, true, stream);
 
     return out;  // [1, embed_dim]
 }

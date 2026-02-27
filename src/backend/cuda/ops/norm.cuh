@@ -122,6 +122,55 @@ __global__ void rms_norm_kernel_impl(const T* __restrict__ x,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Fused Add + RMSNorm kernel.
+// out = RMSNorm(input + residual)
+// Also updates residual in-place: residual += input
+// ─────────────────────────────────────────────────────────────────────────────
+template<typename T, int kBlockSize = 256>
+__global__ void fused_add_rms_norm_kernel(const T* __restrict__ input,
+                                          T* __restrict__ residual,
+                                          const T* __restrict__ gamma,
+                                          T* __restrict__ out,
+                                          int64_t rows, int64_t cols,
+                                          float eps) {
+    int64_t row = blockIdx.x;
+    if (row >= rows) return;
+
+    const T* row_input = input + row * cols;
+    T*       row_res   = residual + row * cols;
+    T*       row_out   = out + row * cols;
+
+    float ss = 0.f;
+    for (int col = threadIdx.x; col < cols; col += kBlockSize) {
+        float val = static_cast<float>(row_input[col]) + static_cast<float>(row_res[col]);
+        row_res[col] = static_cast<T>(val); // Update residual in-place
+        ss += val * val;
+    }
+
+    // Warp-shuffle reduction for sum-of-squares
+    // This is faster than shared memory for small block sizes, 
+    // but here we use shared memory for portability/simplicity with kBlockSize=256
+    __shared__ float s_ss[kBlockSize];
+    s_ss[threadIdx.x] = ss;
+    __syncthreads();
+
+    // Parallel reduction in shared memory
+    for (int stride = kBlockSize / 2; stride > 0; stride >>= 1) {
+        if (threadIdx.x < stride) {
+            s_ss[threadIdx.x] += s_ss[threadIdx.x + stride];
+        }
+        __syncthreads();
+    }
+
+    float inv_rms = rsqrtf(s_ss[0] / static_cast<float>(cols) + eps);
+
+    for (int col = threadIdx.x; col < cols; col += kBlockSize) {
+        float val = static_cast<float>(row_res[col]); // Read back updated residual
+        row_out[col] = static_cast<T>(val * inv_rms * static_cast<float>(gamma[col]));
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Host-side launchers
 // ─────────────────────────────────────────────────────────────────────────────
 inline void layer_norm_kernel(const Tensor& x, const Tensor& gamma,
@@ -162,6 +211,28 @@ inline void rms_norm_kernel(const Tensor& x, const Tensor& gamma,
         case DType::Float16:  launch((__half*)nullptr);          break;
         case DType::BFloat16: launch((__nv_bfloat16*)nullptr);   break;
         default: throw std::runtime_error("rms_norm: unsupported dtype");
+    }
+}
+
+inline void fused_add_rms_norm_kernel(const Tensor& input, Tensor& residual, 
+                                      const Tensor& gamma, Tensor& out, 
+                                      float eps, cudaStream_t stream) {
+    int64_t cols = input.shape()[input.ndim() - 1];
+    int64_t rows = input.numel() / cols;
+
+    auto launch = [&]<typename T>(T*) {
+        constexpr int kBS = 256;
+        fused_add_rms_norm_kernel<T, kBS><<<rows, kBS, 0, stream>>>(
+            input.data_ptr<T>(), residual.data_ptr<T>(),
+            gamma.data_ptr<T>(), out.data_ptr<T>(),
+            rows, cols, eps);
+    };
+
+    switch (input.dtype()) {
+        case DType::Float32:  launch((float*)nullptr);           break;
+        case DType::Float16:  launch((__half*)nullptr);          break;
+        case DType::BFloat16: launch((__nv_bfloat16*)nullptr);   break;
+        default: throw std::runtime_error("fused_add_rms_norm: unsupported dtype");
     }
 }
 

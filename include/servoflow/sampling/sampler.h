@@ -74,6 +74,8 @@ public:
     // use_cuda_graph: capture the denoising loop on first call, replay thereafter.
     explicit FlowMatchingSampler(bool use_cuda_graph = true);
 
+    void set_enable_graph(bool enable) { use_cuda_graph_ = enable; }
+
     // buffers: pre-allocated by InferenceEngine; must remain valid for the
     // lifetime of the sampler. If nullptr, buffers are allocated internally
     // (disables CUDA Graph support).

@@ -81,6 +81,8 @@ Tensor FlowMatchingSampler::sample(const Tensor& x_init,
         if (use_graph) {
             backend->graph_end_capture(stream);
             graph_captured_ = true;
+            // Launch the captured graph immediately so the first call produces results!
+            backend->graph_launch(stream);
         }
     } else {
         // Graph replay: all kernel launches happen in a single driver call.

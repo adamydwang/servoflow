@@ -20,6 +20,7 @@ void flash_attention(const Tensor& Q, const Tensor& K, const Tensor& V,
                      Tensor& out,
                      const Tensor* mask,
                      float scale, bool is_causal,
+                     void* workspace, size_t workspace_size,
                      cudaStream_t stream);
 
 }  // namespace cuda_ops

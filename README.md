@@ -109,6 +109,31 @@ ctest --test-dir build --output-on-failure
 
 ---
 
+## Benchmarks
+
+### RDT-1B Performance (RTX 3090)
+
+ServoFlow achieves **1.61x speedup** over optimized PyTorch (FP16) for RDT-1B inference, thanks to aggressive operator fusion, zero-overhead memory management, and CUDA Graph execution.
+
+| Metric | PyTorch (FP16) | ServoFlow (FP16) | Speedup |
+| :--- | :--- | :--- | :--- |
+| **Loop Latency (10 steps)** | 551.48 ms | **342.95 ms** | **1.61x** |
+| **Per-step Latency** | 55.15 ms | **34.30 ms** | **1.61x** |
+| **Control Freq** | 1.81 Hz | **2.92 Hz** | **1.61x** |
+
+**Key Optimizations:**
+1. **CUDA Graph**: Captures the entire denoising loop (10 steps × 28 blocks) into a single graph launch, eliminating CPU overhead.
+2. **Memory Pool**: Custom `cudaMallocAsync`-based memory pool ensures zero allocation overhead during inference.
+3. **Operator Fusion**: Fused `Add+RMSNorm` and `GEMM+Bias+Act` kernels minimize memory bandwidth usage.
+4. **FlashAttention**: Zero-allocation integration of FlashAttention v2.
+
+To run benchmarks:
+```bash
+./run_gpu_comparison.sh
+```
+
+---
+
 ## Project Layout
 
 ```

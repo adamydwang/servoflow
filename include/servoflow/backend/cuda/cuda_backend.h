@@ -4,6 +4,7 @@
 #include "servoflow/backend/backend.h"
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
+#include <cublasLt.h>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
@@ -25,30 +26,19 @@ public:
     ~CUDAMemoryPool();
 
     // Allocate at least `bytes` bytes on the device. Returns device pointer.
-    void* alloc(size_t bytes);
+    void* alloc(size_t bytes, cudaStream_t stream);
 
     // Return ptr (allocated with this pool) back to the free-list.
-    void  free(void* ptr, size_t bytes);
+    void  free(void* ptr, size_t bytes, cudaStream_t stream);
 
     // Release all cached blocks back to CUDA.
     void  empty_cache();
 
-    size_t cached_bytes()    const;
-    size_t allocated_bytes() const;
+    size_t cached_bytes()    const { return 0; } // Async pool managed by driver
+    size_t allocated_bytes() const { return 0; }
 
 private:
-    struct Block {
-        void*  ptr;
-        size_t size;
-    };
-
     int device_index_;
-    std::unordered_map<size_t, std::vector<Block>> free_blocks_;  // size → list
-    size_t cached_bytes_    = 0;
-    size_t allocated_bytes_ = 0;
-    mutable std::mutex mu_;
-
-    static size_t round_up(size_t bytes);
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -106,6 +96,13 @@ public:
                       bool trans_a, bool trans_b,
                       StreamHandle stream) override;
 
+    void gemm_bias_act(const Tensor& A, const Tensor& B, 
+                       const Tensor& bias, Tensor& C,
+                       ActivationType act,
+                       float alpha, float beta,
+                       bool trans_a, bool trans_b,
+                       StreamHandle stream) override;
+
     void attention(const Tensor& Q, const Tensor& K, const Tensor& V,
                    Tensor& out,
                    const Tensor* mask,
@@ -120,6 +117,10 @@ public:
     void rms_norm(const Tensor& x, const Tensor& gamma,
                   Tensor& out, float eps,
                   StreamHandle stream) override;
+
+    void fused_add_rms_norm(const Tensor& input, Tensor& residual,
+                            const Tensor& gamma, Tensor& out,
+                            float eps, StreamHandle stream) override;
 
     void add(const Tensor& a, const Tensor& b, Tensor& out,
              StreamHandle stream) override;
@@ -146,6 +147,7 @@ public:
     // ── CUDA-specific helpers (used by model implementations) ─────────────
     int            device_index()   const { return device_index_; }
     cublasHandle_t cublas_handle()  const { return cublas_; }
+    cublasLtHandle_t cublaslt_handle() const { return cublas_lt_; }
     CUDAMemoryPool& pool()                { return pool_; }
 
 private:
@@ -165,11 +167,17 @@ private:
 
     int             device_index_;
     cublasHandle_t  cublas_ = nullptr;
+    cublasLtHandle_t cublas_lt_ = nullptr;
     CUDAMemoryPool  pool_;
 
     // One CUDAGraph per stream for graph capture replay.
     std::unordered_map<cudaStream_t, CUDAGraph> graphs_;
     std::mutex graphs_mu_;
+
+    // Workspace for FlashAttention (avoid malloc inside graph).
+    void*  attention_workspace_ = nullptr;
+    size_t attention_workspace_size_ = 0;
+    std::mutex attention_mu_;
 };
 
 // Register the CUDA backend into BackendRegistry at static-init time.

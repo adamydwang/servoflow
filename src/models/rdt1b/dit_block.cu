@@ -113,14 +113,15 @@ Tensor TimestepEmbedding::forward(int64_t t, BackendPtr backend,
 
     // Linear1: [1, freq_dim] × [hidden_dim, freq_dim]^T → [1, hidden_dim]
     Tensor h = backend->alloc(Shape({1, embed_dim_}), dt, stream);
-    backend->gemm(emb, mlp0_weight_, h, 1.f, 0.f, false, true, stream);
-    backend->add(h, mlp0_bias_.view({1, embed_dim_}), h, stream);
-    backend->silu(h, h, stream);
+    backend->gemm_bias_act(emb, mlp0_weight_, mlp0_bias_, h,
+                           IBackend::ActivationType::SiLU,
+                           1.f, 0.f, false, true, stream);
 
     // Linear2: [1, hidden_dim] × [hidden_dim, hidden_dim]^T → [1, hidden_dim]
     Tensor out = backend->alloc(Shape({1, embed_dim_}), dt, stream);
-    backend->gemm(h, mlp2_weight_, out, 1.f, 0.f, false, true, stream);
-    backend->add(out, mlp2_bias_.view({1, embed_dim_}), out, stream);
+    backend->gemm_bias_act(h, mlp2_weight_, mlp2_bias_, out,
+                           IBackend::ActivationType::None,
+                           1.f, 0.f, false, true, stream);
 
     return out;  // [1, hidden_dim]
 }
@@ -148,14 +149,15 @@ Tensor Mlp::forward(const Tensor& x, BackendPtr backend,
     // fc1: [B*S, in_dim] → [B*S, in_dim]
     Tensor x_2d = x.view({B * S, in_dim_});
     Tensor h    = backend->alloc(Shape({B * S, in_dim_}), dt, stream);
-    backend->gemm(x_2d, fc1_weight_, h, 1.f, 0.f, false, true, stream);
-    backend->add(h, fc1_bias_.view({1, in_dim_}), h, stream);
-    backend->gelu(h, h, stream);  // GELU with tanh approximation
+    backend->gemm_bias_act(x_2d, fc1_weight_, fc1_bias_, h,
+                           IBackend::ActivationType::GELU,
+                           1.f, 0.f, false, true, stream);
 
     // fc2: [B*S, in_dim] → [B*S, out_dim]
     Tensor out_2d = backend->alloc(Shape({B * S, out_dim_}), dt, stream);
-    backend->gemm(h, fc2_weight_, out_2d, 1.f, 0.f, false, true, stream);
-    backend->add(out_2d, fc2_bias_.view({1, out_dim_}), out_2d, stream);
+    backend->gemm_bias_act(h, fc2_weight_, fc2_bias_, out_2d,
+                           IBackend::ActivationType::None,
+                           1.f, 0.f, false, true, stream);
 
     return out_2d.view({B, S, out_dim_});
 }
@@ -202,8 +204,9 @@ Tensor SelfAttention::forward(const Tensor& x, BackendPtr backend,
     // QKV projection: [B*S, D] → [B*S, 3D]
     Tensor x_2d   = x.view({B * S, hidden_dim_});
     Tensor qkv_2d = backend->alloc(Shape({B * S, 3 * hidden_dim_}), dt, stream);
-    backend->gemm(x_2d, qkv_weight_, qkv_2d, 1.f, 0.f, false, true, stream);
-    backend->add(qkv_2d, qkv_bias_.view({1, 3 * hidden_dim_}), qkv_2d, stream);
+    backend->gemm_bias_act(x_2d, qkv_weight_, qkv_bias_, qkv_2d,
+                           IBackend::ActivationType::None,
+                           1.f, 0.f, false, true, stream);
 
     // Split QKV: [B, S, 3D] → three [B, H, S, head_dim]
     Tensor qkv = qkv_2d.view({B, S, 3 * hidden_dim_});
@@ -227,8 +230,9 @@ Tensor SelfAttention::forward(const Tensor& x, BackendPtr backend,
     // Output projection: [B*S, D] → [B*S, D]
     Tensor attn_2d = attn_seq.view({B * S, hidden_dim_});
     Tensor out_2d  = backend->alloc(Shape({B * S, hidden_dim_}), dt, stream);
-    backend->gemm(attn_2d, proj_weight_, out_2d, 1.f, 0.f, false, true, stream);
-    backend->add(out_2d, proj_bias_.view({1, hidden_dim_}), out_2d, stream);
+    backend->gemm_bias_act(attn_2d, proj_weight_, proj_bias_, out_2d,
+                           IBackend::ActivationType::None,
+                           1.f, 0.f, false, true, stream);
 
     return out_2d.view({B, S, hidden_dim_});
 }
@@ -277,14 +281,16 @@ Tensor CrossAttention::forward(const Tensor& x, const Tensor& c,
     // Q from x: [B*Sq, D] → [B*Sq, D]
     Tensor x_2d  = x.view({B * Sq, hidden_dim_});
     Tensor q_2d  = backend->alloc(Shape({B * Sq, hidden_dim_}), dt, stream);
-    backend->gemm(x_2d, q_weight_, q_2d, 1.f, 0.f, false, true, stream);
-    backend->add(q_2d, q_bias_.view({1, hidden_dim_}), q_2d, stream);
+    backend->gemm_bias_act(x_2d, q_weight_, q_bias_, q_2d,
+                           IBackend::ActivationType::None,
+                           1.f, 0.f, false, true, stream);
 
     // KV from c: [B*Sk, D] → [B*Sk, 2D]
     Tensor c_2d  = c.view({B * Sk, hidden_dim_});
     Tensor kv_2d = backend->alloc(Shape({B * Sk, 2 * hidden_dim_}), dt, stream);
-    backend->gemm(c_2d, kv_weight_, kv_2d, 1.f, 0.f, false, true, stream);
-    backend->add(kv_2d, kv_bias_.view({1, 2 * hidden_dim_}), kv_2d, stream);
+    backend->gemm_bias_act(c_2d, kv_weight_, kv_bias_, kv_2d,
+                           IBackend::ActivationType::None,
+                           1.f, 0.f, false, true, stream);
 
     // Convert Q: [B*Sq, D] seq-major → [B, H, Sq, D] head-major for attention.
     Tensor Q_seq = q_2d.view({B, Sq, hidden_dim_});  // [B, Sq, H*D]
@@ -312,8 +318,9 @@ Tensor CrossAttention::forward(const Tensor& x, const Tensor& c,
     // Output projection: [B*Sq, D] → [B*Sq, D]
     Tensor attn_2d = attn_seq.view({B * Sq, hidden_dim_});
     Tensor out_2d  = backend->alloc(Shape({B * Sq, hidden_dim_}), dt, stream);
-    backend->gemm(attn_2d, proj_weight_, out_2d, 1.f, 0.f, false, true, stream);
-    backend->add(out_2d, proj_bias_.view({1, hidden_dim_}), out_2d, stream);
+    backend->gemm_bias_act(attn_2d, proj_weight_, proj_bias_, out_2d,
+                           IBackend::ActivationType::None,
+                           1.f, 0.f, false, true, stream);
 
     return out_2d.view({B, Sq, hidden_dim_});
 }
@@ -347,32 +354,36 @@ Tensor RDTBlock::forward(const Tensor& x,
     (void)dt;
 
     // ── Self-attention branch ──────────────────────────────────────────────
+    // 1. Norm1
+    // We need a mutable residual tensor 'current_x' initialized with x.
+    Tensor current_x = backend->alloc(x.shape(), x.dtype(), stream);
+    backend->copy(current_x, x, stream); 
+
     Tensor normed1 = backend->alloc(x.shape(), x.dtype(), stream);
-    backend->rms_norm(x, norm1_weight_, normed1, norm_eps_, stream);
+    backend->rms_norm(current_x, norm1_weight_, normed1, norm_eps_, stream);
 
     Tensor attn_out = self_attn_.forward(normed1, backend, stream);
-    Tensor x1 = backend->alloc(x.shape(), x.dtype(), stream);
-    backend->add(x, attn_out, x1, stream);
-
-    // ── Cross-attention branch (alternating: even=lang, odd=img) ──────────
+    
+    // 2. Fuse: current_x += attn_out; normed2 = rms_norm(current_x)
+    // ── Cross-attention branch ────────────────────────────────────────────
     const Tensor& cond = (block_idx % 2 == 0) ? lang_cond : img_cond;
 
-    Tensor normed2 = backend->alloc(x1.shape(), x1.dtype(), stream);
-    backend->rms_norm(x1, norm2_weight_, normed2, norm_eps_, stream);
+    Tensor normed2 = backend->alloc(x.shape(), x.dtype(), stream);
+    backend->fused_add_rms_norm(attn_out, current_x, norm2_weight_, normed2, norm_eps_, stream);
 
     Tensor cross_out = cross_attn_.forward(normed2, cond, backend, stream);
-    Tensor x2 = backend->alloc(x1.shape(), x1.dtype(), stream);
-    backend->add(x1, cross_out, x2, stream);
-
+    
+    // 3. Fuse: current_x += cross_out; normed3 = rms_norm(current_x)
     // ── MLP branch ────────────────────────────────────────────────────────
-    Tensor normed3 = backend->alloc(x2.shape(), x2.dtype(), stream);
-    backend->rms_norm(x2, norm3_weight_, normed3, norm_eps_, stream);
+    Tensor normed3 = backend->alloc(x.shape(), x.dtype(), stream);
+    backend->fused_add_rms_norm(cross_out, current_x, norm3_weight_, normed3, norm_eps_, stream);
 
     Tensor ffn_out = ffn_.forward(normed3, backend, stream);
-    Tensor x3 = backend->alloc(x2.shape(), x2.dtype(), stream);
-    backend->add(x2, ffn_out, x3, stream);
+    
+    // 4. Final Add (no norm). Just add ffn_out to current_x.
+    backend->add(current_x, ffn_out, current_x, stream);
 
-    return x3;
+    return current_x;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
