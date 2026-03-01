@@ -209,6 +209,20 @@ public:
     virtual void cat(const std::vector<Tensor>& inputs, Tensor& out,
                      int64_t dim = 0, StreamHandle stream = nullptr) = 0;
 
+    // Unpack QKV: [B, S, 3*D] -> Q, K, V [B, H, S, Dh]
+    // D = H * Dh
+    // This handles the reshape and permute to get ready for attention.
+    // Q, K, V must be pre-allocated with shape [B, H, S, Dh] (or compatible).
+    virtual void unpack_qkv(const Tensor& qkv, int64_t num_heads, int64_t head_dim,
+                            Tensor& q, Tensor& k, Tensor& v,
+                            StreamHandle stream = nullptr) = 0;
+
+    // Permute dimensions.
+    // dst must be pre-allocated with permuted shape.
+    virtual void permute(const Tensor& src, Tensor& dst,
+                         const std::vector<int64_t>& dims,
+                         StreamHandle stream = nullptr) = 0;
+
     // ── Graph capture (optional, no-op on backends that don't support it) ─
     virtual void graph_begin_capture(StreamHandle) {}
     virtual void graph_end_capture(StreamHandle)   {}

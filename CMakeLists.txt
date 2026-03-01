@@ -81,7 +81,9 @@ set(SF_CUDA_SOURCES
     src/backend/cuda/ops/attention.cu
     src/backend/cuda/ops/elementwise.cu
     src/backend/cuda/ops/quantization.cu
+    src/backend/cuda/ops/permute.cu
     src/models/rdt1b/dit_block.cu
+    src/models/octo/octo.cpp
 )
 
 # FlashAttention v2 — integrated from source.

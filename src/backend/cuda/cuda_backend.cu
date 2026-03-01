@@ -4,6 +4,7 @@
 #include "backend/cuda/ops/elementwise.cuh"
 #include "backend/cuda/ops/norm.cuh"
 #include "backend/cuda/ops/quantization.cuh"
+#include "backend/cuda/ops/permute.h"
 
 #include <cuda_fp16.h>
 #include <cublas_v2.h>
@@ -571,6 +572,20 @@ void CUDABackend::dequantize(const Tensor& input, const Tensor& scale,
 void CUDABackend::cat(const std::vector<Tensor>& inputs, Tensor& out,
                       int64_t dim, StreamHandle stream) {
     cuda_ops::cat_kernel(inputs, out, dim, to_stream(stream));
+}
+
+// ── Unpack QKV ────────────────────────────────────────────────────────────────
+void CUDABackend::unpack_qkv(const Tensor& qkv, int64_t num_heads, int64_t head_dim,
+                             Tensor& q, Tensor& k, Tensor& v, StreamHandle stream) {
+    check_device(qkv, "qkv"); check_device(q, "q"); check_device(k, "k"); check_device(v, "v");
+    cuda_ops::unpack_qkv_kernel(qkv, num_heads, head_dim, q, k, v, to_stream(stream));
+}
+
+// ── Permute ───────────────────────────────────────────────────────────────────
+void CUDABackend::permute(const Tensor& src, Tensor& dst,
+                          const std::vector<int64_t>& dims, StreamHandle stream) {
+    check_device(src, "src"); check_device(dst, "dst");
+    cuda_ops::permute_tensor(src, dst, dims, to_stream(stream));
 }
 
 // ── Graph capture ─────────────────────────────────────────────────────────────

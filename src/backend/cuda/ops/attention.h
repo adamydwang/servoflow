@@ -23,5 +23,9 @@ void flash_attention(const Tensor& Q, const Tensor& K, const Tensor& V,
                      void* workspace, size_t workspace_size,
                      cudaStream_t stream);
 
+// Unpack QKV: [B, S, 3*H*D] -> Q, K, V [B, H, S, D]
+void unpack_qkv_kernel(const Tensor& qkv, int64_t num_heads, int64_t head_dim,
+                       Tensor& q, Tensor& k, Tensor& v, cudaStream_t stream);
+
 }  // namespace cuda_ops
 }  // namespace sf

@@ -19,6 +19,14 @@ sf_add_test(test_tensor)
 sf_add_test(test_sampler)
 sf_add_test(test_quantization)
 
+add_executable(test_octo models/test_octo.cpp)
+target_link_libraries(test_octo PRIVATE servoflow GTest::gtest_main)
+target_include_directories(test_octo PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src
+)
+gtest_discover_tests(test_octo)
+
 # Integration tests require CUDA.
 if(SF_ENABLE_CUDA)
     add_executable(test_vla_pipeline integration/test_vla_pipeline.cpp)

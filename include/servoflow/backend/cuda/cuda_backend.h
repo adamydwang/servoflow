@@ -141,6 +141,13 @@ public:
                     StreamHandle stream) override;
     void cat(const std::vector<Tensor>& inputs, Tensor& out,
              int64_t dim, StreamHandle stream) override;
+    void unpack_qkv(const Tensor& qkv, int64_t num_heads, int64_t head_dim,
+                    Tensor& q, Tensor& k, Tensor& v,
+                    StreamHandle stream) override;
+
+    void permute(const Tensor& src, Tensor& dst,
+                 const std::vector<int64_t>& dims,
+                 StreamHandle stream) override;
 
     void graph_begin_capture(StreamHandle stream) override;
     void graph_end_capture(StreamHandle stream)   override;

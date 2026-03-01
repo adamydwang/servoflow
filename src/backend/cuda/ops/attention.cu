@@ -196,5 +196,75 @@ void flash_attention(const Tensor& Q, const Tensor& K, const Tensor& V,
     fallback_attention(Q, K, V, out, scale, is_causal, stream);
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Unpack QKV
+// ─────────────────────────────────────────────────────────────────────────────
+template<typename T>
+__global__ void unpack_qkv_kernel_impl(
+    const T* __restrict__ qkv,
+    T* __restrict__ q,
+    T* __restrict__ k,
+    T* __restrict__ v,
+    int64_t B, int64_t S, int64_t H, int64_t D)
+{
+    // Grid covers output elements: B * H * S * D
+    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    int64_t total = B * H * S * D;
+    if (idx >= total) return;
+
+    // Decode output index (layout: B, H, S, D)
+    int64_t d = idx % D;
+    int64_t temp = idx / D;
+    int64_t s = temp % S;
+    temp /= S;
+    int64_t h = temp % H;
+    int64_t b = temp / H;
+
+    // Input layout: [B, S, 3 * H * D]
+    // Inner dim 3*H*D is packed as [Q_all_heads, K_all_heads, V_all_heads]
+    // where each block is [H * D].
+    // Within H*D, layout is [h * D + d].
+    
+    int64_t D_model = H * D;
+    int64_t in_offset_base = b * (S * 3 * D_model) + s * (3 * D_model);
+    
+    // Q
+    q[idx] = qkv[in_offset_base + 0 * D_model + h * D + d];
+    // K
+    k[idx] = qkv[in_offset_base + 1 * D_model + h * D + d];
+    // V
+    v[idx] = qkv[in_offset_base + 2 * D_model + h * D + d];
+}
+
+void unpack_qkv_kernel(const Tensor& qkv, int64_t num_heads, int64_t head_dim,
+                       Tensor& q, Tensor& k, Tensor& v, cudaStream_t stream) {
+    int64_t B = q.shape()[0];
+    int64_t H = num_heads;
+    int64_t S = q.shape()[2];
+    int64_t D = head_dim;
+    
+    int64_t total = B * H * S * D;
+    int block = 256;
+    int grid = (total + block - 1) / block;
+
+    if (qkv.dtype() == DType::Float16) {
+        unpack_qkv_kernel_impl<half><<<grid, block, 0, stream>>>(
+            static_cast<const half*>(qkv.raw_data_ptr()),
+            static_cast<half*>(q.raw_data_ptr()),
+            static_cast<half*>(k.raw_data_ptr()),
+            static_cast<half*>(v.raw_data_ptr()),
+            B, S, H, D);
+    } else if (qkv.dtype() == DType::Float32) {
+        unpack_qkv_kernel_impl<float><<<grid, block, 0, stream>>>(
+            static_cast<const float*>(qkv.raw_data_ptr()),
+            static_cast<float*>(q.raw_data_ptr()),
+            static_cast<float*>(k.raw_data_ptr()),
+            static_cast<float*>(v.raw_data_ptr()),
+            B, S, H, D);
+    } else {
+         throw std::runtime_error("unpack_qkv: unsupported dtype");
+    }
+}
+
 } // namespace cuda_ops
 } // namespace sf
