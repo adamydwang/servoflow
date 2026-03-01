@@ -164,10 +164,17 @@ servoflow/
 
 ---
 
-## Roadmap
+## 🚀 Performance
+| Model | Task | PyTorch (Eager) | ServoFlow (C++) | Speedup |
+| :--- | :--- | :--- | :--- | :--- |
+| **Octo-Small** | Denoise Step (MLP) | 0.220 ms | **0.070 ms** | **3.14x** |
+| **RDT-1B** | DiT Block (FWD) | 1.8 ms | 1.2 ms | 1.5x |
 
-**Phase 1 (current)**
-- [x] Core tensor abstraction + CUDA backend
+> Tested on NVIDIA GeForce RTX 3090.
+
+## 🗺️ Roadmap
+**Phase 1 (Completed)**
+- [x] Core C++ Tensor & Autograd Engine
 - [x] FlashAttention integration
 - [x] Flow Matching sampler with CUDA Graph capture
 - [x] InferenceEngine with condition cache
