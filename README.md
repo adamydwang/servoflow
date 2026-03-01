@@ -176,9 +176,14 @@ servoflow/
 - [x] Benchmark vs diffusers + TensorRT pipeline (PyTorch baseline)
 
 **Phase 2**
+- [ ] **Octo Support** (Standard Transformer Diffusion Policy)
+  - [ ] Transformer Backbone + FiLM/Cross-Attn
+  - [ ] Diffusion Head (MLP)
+  - [ ] ViT Encoder Integration
+- [ ] **Dita Support** (Native DiT Policy)
+  - [ ] Scalable Diffusion Transformer Architecture
 - [x] Backend support for INT8 dequantization (Weight-Only)
-- [ ] Model distillation (fewer denoising steps)
-- [ ] INT8 / INT4 model loading & integration
+- [ ] INT4 / INT8 quantization for LLM backbone
 - [ ] ROCm backend
 - [ ] Jetson / edge hardware optimisation
 - [ ] TensorRT backend
